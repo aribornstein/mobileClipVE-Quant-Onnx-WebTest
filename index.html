@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+</head>
+<body>
+  <h2>ONNX Vision Encoder Browser Comparison</h2>
+  <input type="file" id="fileInput" accept="image/*"><br>
+  <button id="runButton">Run Comparison</button>
+  <pre id="output"></pre>
+
+  <script>
+    // Helper: load ONNX model from URL or local file
+    async function loadModel(modelUrlOrFile) {
+      let session;
+      if (typeof modelUrlOrFile === "string") {
+        session = await ort.InferenceSession.create(modelUrlOrFile);
+      } else {
+        // If File (from upload)
+        const buffer = await modelUrlOrFile.arrayBuffer();
+        session = await ort.InferenceSession.create(buffer);
+      }
+      return session;
+    }
+
+    // Helper: make dummy image tensor [1, 3, 224, 224] in [-1, 1]
+    function makeDummyInput() {
+      const arr = new Float32Array(1 * 3 * 224 * 224);
+      for (let i = 0; i < arr.length; ++i) arr[i] = (Math.random() * 2 - 1); // CLIP-style
+      return new ort.Tensor('float32', arr, [1, 3, 224, 224]);
+    }
+
+    // Helper: preprocess uploaded image file to Float32 tensor [1,3,224,224] (very basic, no normalization)
+    function preprocessImage(img, size = 224) {
+      // Create a canvas to resize and extract RGB values
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, size, size);
+      const data = ctx.getImageData(0, 0, size, size).data;
+      // Convert to Float32, channel-first
+      const out = new Float32Array(1 * 3 * size * size);
+      let i = 0;
+      for (let y = 0; y < size; ++y) {
+        for (let x = 0; x < size; ++x) {
+          const idx = (y * size + x) * 4;
+          out[0 * size * size + y * size + x] = (data[idx] / 127.5) - 1;      // R
+          out[1 * size * size + y * size + x] = (data[idx + 1] / 127.5) - 1;  // G
+          out[2 * size * size + y * size + x] = (data[idx + 2] / 127.5) - 1;  // B
+        }
+      }
+      return new ort.Tensor('float32', out, [1, 3, size, size]);
+    }
+
+    async function runComparison() {
+      const out = document.getElementById("output");
+      out.textContent = "Loading models...\n";
+
+      // Load both models (local files or URLs)
+      // (Change path if serving from a server)
+      const fp32ModelPath = "vision_encoder.onnx";
+      const quantModelPath = "vision_encoder.convonly.onnx";
+      const [fp32Session, quantSession] = await Promise.all([
+        loadModel(fp32ModelPath),
+        loadModel(quantModelPath)
+      ]);
+      out.textContent += "Models loaded.\n";
+
+      // Prepare input (random or image)
+      let inputTensor;
+      const fileInput = document.getElementById("fileInput");
+      if (fileInput.files && fileInput.files.length > 0) {
+        // Use uploaded image
+        const img = new Image();
+        const file = fileInput.files[0];
+        const url = URL.createObjectURL(file);
+        await new Promise(resolve => {
+          img.onload = () => resolve();
+          img.src = url;
+        });
+        inputTensor = preprocessImage(img, 224);
+        out.textContent += "Image loaded and preprocessed.\n";
+      } else {
+        // Use dummy random tensor
+        inputTensor = makeDummyInput();
+        out.textContent += "Using random dummy input.\n";
+      }
+
+      // Run inference
+      out.textContent += "Running inference...\n";
+      const fp32Result = await fp32Session.run({ input: inputTensor });
+      const quantResult = await quantSession.run({ input: inputTensor });
+
+      // Assuming output node name is 'output' (adjust if different!)
+      const out32 = fp32Result.output.data;
+      const outQ = quantResult.output.data;
+
+      // Compare results
+      let maxDiff = 0, meanDiff = 0;
+      for (let i = 0; i < out32.length; ++i) {
+        const diff = Math.abs(out32[i] - outQ[i]);
+        maxDiff = Math.max(maxDiff, diff);
+        meanDiff += diff;
+      }
+      meanDiff /= out32.length;
+
+      out.textContent += `\nOutput size: ${out32.length}
+FP32 vs Quantized model:
+Max abs diff: ${maxDiff}
+Mean abs diff: ${meanDiff}\n`;
+    }
+
+    document.getElementById("runButton").onclick = runComparison;
+  </script>
+</body>
+</html>
